@@ -1,0 +1,99 @@
+#!/bin/bash
+
+set -e
+
+name="toy"
+dest="/var/lib/machines/$name"
+toy_overlay="/var/lib/machines/.$name/overlay"
+toy_var="/var/lib/machines/.$name/var"
+toy_rpmdb="/var/lib/machines/.$name/rpmdb"
+headerdir="/usr/lib/sysimage/rpm-headers"
+pkglibdir="/root/bin"
+dbdir="/usr/lib/sysimage/rpm"
+srcroot=
+
+dbupdate=1
+
+spawn()
+{
+  [ -n "$srcroot" ]
+  systemd-nspawn \
+    --bind=/root \
+    --bind-ro=/run/netconfig \
+    --bind="$toy_rpmdb:$dbdir" \
+    --bind="$toy_var:/var" \
+    --bind=/var/cache/zypp \
+    --overlay "$srcroot:$toy_overlay:/" \
+    -D "$dest" "$@"
+}
+
+cleanup()
+{
+  if mountpoint -q "$dest"; then
+    if [ "$dbupdate" = 1 ]; then
+      spawn -q "$pkglibdir"/dumpheaders --debug
+    fi
+    rm -rf "$toy_rpmdb"
+  fi
+}
+trap cleanup EXIT
+
+prepare()
+{
+  if [ ! -e "$headerdir" ]; then
+    echo "system needs to be initialized with header dump first!" >&2
+    echo "try transactional-update $0 --init" >&2
+    false
+  fi
+  if [ /usr/lib/sysimage/rpm/Packages* -nt "$headerdir" ];  then
+	  echo "$headerdir outated, try transactional-update $0 --init" >&2
+  fi
+  if mountpoint -q "$dest"; then
+    echo "already running" >&2
+    false
+  fi
+  mkdir -p "$dest"/{etc,usr,var} "$toy_overlay"/run/netconfig "$toy_var"/lib "$toy_rpmdb"
+  srcroot=`btrfs subvolume get-default /`
+  srcroot="${srcroot##*@}"
+  if [ "$dbupdate" = 1 -a "$headerdir" -nt "$toy_rpmdb"/Packages* ]; then
+    rm -f -- "$toy_rpmdb"/*
+    "$pkglibdir"/importheaders "$toy_rpmdb"
+  fi
+}
+
+dumpheaders()
+{
+	mkdir -p "$headerdir"
+	rm -f -- "$headerdir"/*.rpm
+	"$pkglibdir/dumpheaders" --debug
+	exit $?
+}
+
+usage()
+{
+	echo "$0 [--init]"
+	exit 0
+}
+
+shortopts=h
+longopts=help,init,nodbupdate
+getopt_tmp=`getopt -o "$shortopts" --long "$longopts" \
+     -n "$progname" -- "$@"`
+
+if [ $? != 0 ] ; then echo "error parsing command line options" >&2 ; exit 1 ; fi
+
+eval set -- "$getopt_tmp"
+
+while true ; do
+    case "$1" in
+        -h|--help) usage ; shift ;;
+        --init) dumpheaders ; shift ;;
+        --nodbupdate) dbupdate=0 ; shift ;;
+        --) shift ; break ;;
+        *) echo "error parsing command line options" ; exit 1 ;;
+    esac
+done
+
+prepare
+
+spawn "$@"

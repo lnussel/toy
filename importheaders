@@ -1,0 +1,4 @@
+#!/bin/bash
+rpmdb --initdb --dbpath "$1"
+echo "Importing rpm database..."
+cat /usr/lib/sysimage/rpm-headers/*.rpm | time rpmdb --importdb --dbpath "$1"
