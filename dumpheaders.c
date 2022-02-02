@@ -24,13 +24,21 @@
 #include <string.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <limits.h>
 #include <rpm/rpmcli.h>
 #include <rpm/rpmts.h>
 #include <rpm/rpmdb.h>
+#include <rpm/rpmlog.h>
+
+#define _(x) (x)
+
+#include "rpminternal.h"
+#include "writeheader.c"
 
 static int debug_flag = 0;
 static int verbose_flag = 0;
 static int force_flag = 0;
+static int raw_flag = 0;
 
 static const char* header_dir = "/usr/lib/sysimage/rpm-headers";
 
@@ -47,6 +55,7 @@ print_error (void)
       "Try `dumpheaders --help' or `dumpheaders --usage' for more information.\n");
 }
 
+
 int
 main (int argc, char *argv[])
 {
@@ -54,6 +63,7 @@ main (int argc, char *argv[])
   rpmts ts = NULL;
   int rc = 0;
   int num_written = 0;
+  const char* pkgname = NULL;
 
   while (1)
   {
@@ -62,14 +72,12 @@ main (int argc, char *argv[])
     static struct option long_options[] = {
       {"usage",                     no_argument,       NULL,  'u' },
       {"dir",                       required_argument, NULL,  'd' },
+      {"raw",                       no_argument,       NULL,  253 },
       {"debug",                     no_argument,       NULL,  254 },
       {"verbose",                   no_argument,       NULL, 'v' },
       {"help",                      no_argument,       NULL,  255 },
       {NULL,                    0,                 NULL,    0 }
     };
-
-    /* Don't let getopt print error messages, we do it ourselves. */
-    opterr = 0;
 
     c = getopt_long (argc, argv, "d:fuv",
         long_options, &option_index);
@@ -92,16 +100,26 @@ main (int argc, char *argv[])
       case 'v':
         verbose_flag = 1;
         break;
+      case 253:
+        raw_flag = 1;
+        break;
       case 254:
         debug_flag = 1;
         break;
       default:
-        break;
+        print_error ();
+        return 1;
     }
   }
 
   argc -= optind;
   argv += optind;
+
+  if (argc > 0)
+  {
+    pkgname = argv[0];
+    --argc;
+  }
 
   if (argc > 0)
   {
@@ -116,15 +134,15 @@ main (int argc, char *argv[])
   rpmtsSetRootDir (ts, rpmcliRootDir);
 
   rpmtxn txn = rpmtxnBegin(ts, RPMTXN_READ);
-  if (!txn)
+  if (!txn && getuid() == 0)
+      return 1;
+
+  rpmdbMatchIterator mi = rpmtsInitIterator (ts, RPMDBI_LABEL, pkgname, pkgname?strlen(pkgname):0);
+  if (mi == NULL)
   {
-    fprintf (stderr, "failed to open transaction\n");
+    fprintf (stderr, "failed to initialize iterator\n");
     return 1;
   }
-
-  rpmdbMatchIterator mi = rpmtsInitIterator (ts, RPMDBI_PACKAGES, NULL, 0);
-  if (mi == NULL)
-    return 1;
 
   while ((h = rpmdbNextIterator (mi)) != NULL)
   {
@@ -135,9 +153,13 @@ main (int argc, char *argv[])
     if (access(buf, F_OK) == -1 || force_flag) {
       fd = Fopen(buf, "w.ufdio");
       if (fd) {
-        if(headerWrite(fd, h, HEADER_MAGIC_YES) != 0) {
-           fprintf(stderr, "failed to write %s\n", buf);
-           rc = 1;
+        if (raw_flag) {
+          if(headerWrite(fd, h, HEADER_MAGIC_YES) != 0) {
+            fprintf(stderr, "failed to write %s\n", buf);
+            rc = 1;
+          }
+        } else {
+          headerWriteAsPackage(fd, h);
         }
         Fclose(fd);
         ++num_written;
